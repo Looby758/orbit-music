@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Check, ChevronLeft, ChevronRight, Copy, ExternalLink, Folder as FolderIcon, HardDrive, LogOut, RefreshCw, Search, Trash2 } from 'lucide-react'
-import { chooseFolder, forgetFolder, refreshLibrary, report, useLibrary, type Folder } from '../library'
+import { chooseFolder, forgetFolder, refreshLibrary, report, setKeepAll, useLibrary, type Folder } from '../library'
 import { fileInfo, findFolders, folderIdFromLink, FOLDER, foldersIn, type DriveFile } from '../drive'
 import { returnAddress, saveClientId, savedClientId, signIn, signOut } from '../google'
 import { back } from '../nav'
@@ -222,6 +222,9 @@ export function SettingsPage() {
   const email = useLibrary((s) => s.email)
   const songs = useLibrary((s) => s.songs.length)
   const downloaded = useLibrary((s) => s.downloaded.size)
+  const keepAll = useLibrary((s) => s.keepAll)
+  const totalSize = useLibrary((s) => s.songs.reduce((n, x) => n + x.size, 0))
+  const downloadingNow = useLibrary((s) => Object.keys(s.downloading).length)
   const pending = useLibrary((s) => s.pending.length)
   const [choosing, setChoosing] = useState(false)
   const [usage, setUsage] = useState<string>('')
@@ -254,15 +257,34 @@ export function SettingsPage() {
       </section>
       <section className="card-box">
         <h2>Downloads</h2>
+        <label className="switch-row" data-keep-all>
+          <span className="grow">
+            <strong>Keep all my music on this phone</strong>
+            <span className="faint small">Downloads every song (about {totalSize >= 1024 ** 3 ? `${(totalSize / 1024 ** 3).toFixed(1)} GB` : `${Math.max(1, Math.round(totalSize / 1024 ** 2))} MB`}), and new ones as they appear, so everything plays without internet.</span>
+          </span>
+          <input
+            type="checkbox"
+            className="switch"
+            checked={keepAll}
+            onChange={(e) => {
+              if (e.target.checked && totalSize > 2 * 1024 ** 3 && !confirm(`That’s about ${(totalSize / 1024 ** 3).toFixed(1)} GB. Make sure your phone has room, and you’re on Wi-Fi. Carry on?`)) return
+              void setKeepAll(e.target.checked)
+            }}
+          />
+        </label>
         <p>
-          {downloaded} {downloaded === 1 ? 'song' : 'songs'} on this phone{usage ? `, ${usage} used` : ''}.
+          {downloaded} of {songs} {songs === 1 ? 'song' : 'songs'} on this phone{usage ? `, ${usage} used` : ''}.
+          {downloadingNow > 0 && ` Downloading ${downloadingNow} more…`}
         </p>
+        {keepAll && downloadingNow > 0 && <p className="faint small">Keep the app open while it downloads. If you leave it, it carries on next time you open it.</p>}
         <button
           className="btn danger"
           disabled={!downloaded}
           onClick={() => {
             if (!confirm('Remove every downloaded song from this phone? They stay in your Drive.')) return
-            void db.clear('songs').then(() => useLibrary.setState({ downloaded: new Set() }))
+            void setKeepAll(false)
+              .then(() => db.clear('songs'))
+              .then(() => useLibrary.setState({ downloaded: new Set() }))
           }}
         >
           <Trash2 size={16} /> Remove all downloads

@@ -48,6 +48,8 @@ interface LibraryState {
   downloading: Record<string, number>
   /** Changes made while offline, sent when the phone is back online. */
   pending: MusicEdit[]
+  /** Every song is kept on this phone (new ones are downloaded as they're found). */
+  keepAll: boolean
 }
 
 export const useLibrary = create<LibraryState>(() => ({
@@ -63,7 +65,8 @@ export const useLibrary = create<LibraryState>(() => ({
   error: null,
   downloaded: new Set(),
   downloading: {},
-  pending: []
+  pending: [],
+  keepAll: false
 }))
 
 const set = useLibrary.setState
@@ -76,7 +79,7 @@ export function report(err: unknown): void {
 }
 
 export async function startLibrary(): Promise<void> {
-  const [auth, folder, songs, data, dataFile, email, downloaded, pending] = await Promise.all([
+  const [auth, folder, songs, data, dataFile, email, downloaded, pending, keepAll] = await Promise.all([
     restoreToken(),
     db.get<Folder>('kv', 'folder'),
     db.get<Song[]>('kv', 'songs'),
@@ -84,7 +87,8 @@ export async function startLibrary(): Promise<void> {
     db.get<DriveFile>('kv', 'dataFile'),
     db.get<string>('kv', 'email'),
     db.keys('songs'),
-    db.get<MusicEdit[]>('kv', 'pending')
+    db.get<MusicEdit[]>('kv', 'pending'),
+    db.get<boolean>('kv', 'keepAll')
   ])
   set({
     ready: true,
@@ -97,7 +101,8 @@ export async function startLibrary(): Promise<void> {
     dataFile: dataFile ?? null,
     email: email ?? '',
     downloaded: new Set(downloaded),
-    pending: pending ?? []
+    pending: pending ?? [],
+    keepAll: !!keepAll
   })
   if (auth.signedIn) {
     if (!email)
@@ -177,6 +182,7 @@ async function readLibrary(): Promise<void> {
     // Downloads of songs no longer in the folder aren't needed.
     const present = new Set(songs.map((s) => s.id))
     for (const id of useLibrary.getState().downloaded) if (!present.has(id)) void removeDownload(id)
+    if (useLibrary.getState().keepAll) downloadSongs(songs)
   } catch (err) {
     set({ scan: null })
     report(err)
@@ -317,6 +323,8 @@ export function downloadSongs(songs: Song[]): void {
         set({ downloaded: new Set([...useLibrary.getState().downloaded, song.id]) })
       } catch (err) {
         report(err)
+        // Without a sign-in the rest can't download either: they carry on next time.
+        if (err instanceof SignInNeeded || !navigator.onLine) cancelDownloads()
       } finally {
         const { [song.id]: _, ...rest } = useLibrary.getState().downloading
         void _
@@ -324,6 +332,14 @@ export function downloadSongs(songs: Song[]): void {
       }
     })
   }
+}
+
+/** Keeps every song on this phone, so it all plays with no internet (or stops adding new ones). */
+export async function setKeepAll(on: boolean): Promise<void> {
+  set({ keepAll: on })
+  await db.put('kv', 'keepAll', on)
+  if (on) downloadSongs(useLibrary.getState().songs)
+  else cancelDownloads()
 }
 
 export async function removeDownload(id: string): Promise<void> {

@@ -49,6 +49,8 @@ function Home() {
   const data = useLibrary((s) => s.data)
   const downloaded = useLibrary((s) => s.downloaded)
   const scan = useLibrary((s) => s.scan)
+  const keepAll = useLibrary((s) => s.keepAll)
+  const downloadingNow = useLibrary((s) => Object.keys(s.downloading).length)
   const [newList, setNewList] = useState(false)
   const byPath = useMemo(() => songsByPath(songs), [songs])
   const liked = useMemo(() => likedSongs(data, byPath), [data, byPath])
@@ -76,6 +78,11 @@ function Home() {
       {scan && (
         <p className="note" data-scan>
           {scan.read ? `Reading song details: ${scan.read} of ${scan.found}…` : `Looking through your music folder… ${scan.found ? `${scan.found} songs so far` : ''}`}
+        </p>
+      )}
+      {keepAll && downloadingNow > 0 && !scan && (
+        <p className="note" data-keep-all-progress>
+          Downloading your music to this phone: {downloaded.size} of {songs.length}. Keep the app open for it to finish.
         </p>
       )}
       <div className="tiles">
