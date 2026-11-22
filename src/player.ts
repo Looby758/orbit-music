@@ -9,6 +9,7 @@ import { artUrl, downloadedBlob, editMusic, report, setDuration, useLibrary } fr
 import { download } from './drive'
 import * as db from './db'
 import type { Song } from './song'
+import { canFadeVolume, CROSSFADE_MAX, fadeLength, fadeVolumes, shouldCrossfade } from './crossfade'
 
 export type Repeat = 'off' | 'all' | 'one'
 
@@ -23,14 +24,22 @@ interface PlayerState {
   shuffle: boolean
   repeat: Repeat
   error: string | null
+  /** Seconds to fade from one song into the next (0 is off). Kept on this phone. */
+  crossfade: number
 }
 
-export const usePlayer = create<PlayerState>(() => ({ queue: [], index: 0, playing: false, loading: null, position: 0, duration: 0, shuffle: false, repeat: 'off', error: null }))
+export const usePlayer = create<PlayerState>(() => ({ queue: [], index: 0, playing: false, loading: null, position: 0, duration: 0, shuffle: false, repeat: 'off', error: null, crossfade: 0 }))
 const set = usePlayer.setState
 const get = usePlayer.getState
 
-const audio = new Audio()
-audio.preload = 'auto'
+/**
+ * Two players, used in turn: the song playing now (`audio`) and the next one when crossfading
+ * (while it fades in, the old one is `fading.from`). The same two are always used, because an
+ * iPhone only lets a player start by itself after you've pressed play on it once.
+ */
+const decks = [newDeck(), newDeck()]
+let audio = decks[0]
+const otherDeck = (): HTMLAudioElement => (audio === decks[0] ? decks[1] : decks[0])
 /** The order before shuffling, to go back to. */
 let ordered: Song[] = []
 
@@ -75,6 +84,7 @@ async function start(index: number, autoplay = true): Promise<void> {
   const song = get().queue[index]
   if (!song) return
   const id = ++playId
+  endCrossfade()
   counted = false
   set({ index, position: 0, duration: song.durationMs / 1000, error: null, loading: 0 })
   updateMediaSession(song)
@@ -106,6 +116,7 @@ const shuffled = <T>(list: T[]): T[] => {
 /** Plays a list of songs from this one (or shuffled). */
 export function playSongs(songs: Song[], from: number | 'shuffle'): void {
   if (!songs.length) return
+  getReadyToFade()
   ordered = songs
   if (from === 'shuffle') {
     set({ shuffle: true, queue: shuffled(songs) })
@@ -122,7 +133,9 @@ export function playSongs(songs: Song[], from: number | 'shuffle'): void {
 
 export function toggle(): void {
   if (!get().queue.length) return
+  getReadyToFade()
   if (!audio.src) return void start(get().index).then(() => resumeAt && ((audio.currentTime = resumeAt), (resumeAt = 0)))
+  endCrossfade()
   if (audio.paused) void audio.play().catch(() => undefined)
   else audio.pause()
 }
@@ -135,6 +148,7 @@ export function next(): void {
 
 export function previous(): void {
   const { index, queue } = get()
+  endCrossfade()
   if (audio.currentTime > 3 || index === 0) {
     audio.currentTime = 0
     return
@@ -143,6 +157,7 @@ export function previous(): void {
 }
 
 export function seek(seconds: number): void {
+  endCrossfade()
   if (Number.isFinite(seconds)) audio.currentTime = Math.max(0, seconds)
   set({ position: audio.currentTime })
 }
@@ -200,43 +215,218 @@ export function moveInQueue(from: number, to: number): void {
 
 export const currentSong = (): Song | undefined => get().queue[get().index]
 
-// ---------- The audio element ----------
+// ---------- The audio elements ----------
 
-audio.addEventListener('play', () => set({ playing: true }))
-audio.addEventListener('pause', () => set({ playing: false }))
-audio.addEventListener('loadedmetadata', () => {
-  const song = currentSong()
-  set({ duration: audio.duration })
-  if (song && Number.isFinite(audio.duration)) setDuration(song, Math.round(audio.duration * 1000))
-})
-audio.addEventListener('timeupdate', () => {
-  set({ position: audio.currentTime })
-  const song = currentSong()
-  if (!counted && song && audio.currentTime >= 30) {
-    counted = true
-    editMusic({ kind: 'played', path: song.path, at: Date.now() })
-  }
-  if ('mediaSession' in navigator && Number.isFinite(audio.duration) && audio.duration > 0) {
-    try {
-      navigator.mediaSession.setPositionState({ duration: audio.duration, position: Math.min(audio.currentTime, audio.duration), playbackRate: 1 })
-    } catch {
-      // Not supported here.
+/** A player for one song. Two are alive while crossfading; only the current one (`audio`) updates the state. */
+function newDeck(): HTMLAudioElement {
+  const el = new Audio()
+  el.preload = 'auto'
+  el.addEventListener('play', () => el === audio && set({ playing: true }))
+  el.addEventListener('pause', () => el === audio && set({ playing: false }))
+  el.addEventListener('loadedmetadata', () => {
+    if (el !== audio) return
+    const song = currentSong()
+    set({ duration: el.duration })
+    if (song && Number.isFinite(el.duration)) setDuration(song, Math.round(el.duration * 1000))
+  })
+  el.addEventListener('timeupdate', () => {
+    if (el !== audio) return
+    set({ position: el.currentTime })
+    const song = currentSong()
+    if (!counted && song && el.currentTime >= 30) {
+      counted = true
+      editMusic({ kind: 'played', path: song.path, at: Date.now() })
     }
+    if ('mediaSession' in navigator && Number.isFinite(el.duration) && el.duration > 0) {
+      try {
+        navigator.mediaSession.setPositionState({ duration: el.duration, position: Math.min(el.currentTime, el.duration), playbackRate: 1 })
+      } catch {
+        // Not supported here.
+      }
+    }
+    maybeCrossfade()
+  })
+  el.addEventListener('ended', () => {
+    if (el !== audio) return
+    const { repeat, index, queue } = get()
+    if (repeat === 'one') {
+      el.currentTime = 0
+      counted = false
+      void el.play()
+    } else if (index + 1 < queue.length) void start(index + 1)
+    else if (repeat === 'all') void start(0)
+    else set({ playing: false })
+  })
+  el.addEventListener('error', () => {
+    if (el === audio && el.src) set({ error: 'This song couldn’t be played (the phone may not play this kind of file).', playing: false })
+  })
+  return el
+}
+
+// ---------- Crossfading ----------
+
+/**
+ * Most phones fade by changing each player's volume. iPhones don't let web apps do that, so
+ * there the sound goes through a Web Audio volume knob instead (only once crossfade is turned on).
+ */
+export const volumeWorks = canFadeVolume()
+let graph: { ctx: AudioContext; gains: Map<HTMLAudioElement, GainNode> } | null = null
+
+function setVolume(el: HTMLAudioElement, v: number): void {
+  const gain = graph?.gains.get(el)
+  if (gain) gain.gain.value = v
+  else el.volume = v
+}
+
+/** Wires both players through Web Audio (iPhone, crossfade on). Once wired, they stay wired. */
+function ensureGraph(): void {
+  if (volumeWorks || graph || !get().crossfade) return
+  try {
+    const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+    const ctx = new Ctx()
+    const gains = new Map<HTMLAudioElement, GainNode>()
+    for (const el of decks) {
+      const gain = ctx.createGain()
+      ctx.createMediaElementSource(el).connect(gain).connect(ctx.destination)
+      gains.set(el, gain)
+    }
+    graph = { ctx, gains }
+  } catch (err) {
+    report(err)
   }
+}
+
+let unlocked = false
+/**
+ * Called when you press play: wires up Web Audio if it's needed, wakes it, and (once) plays a
+ * moment of silence on the spare player, so the phone lets it start the next song by itself later.
+ */
+function getReadyToFade(): void {
+  if (!get().crossfade) return
+  ensureGraph()
+  if (graph?.ctx.state !== 'running') void graph?.ctx.resume().catch(() => undefined)
+  if (unlocked) return
+  unlocked = true
+  const spare = otherDeck()
+  if (spare.src) return
+  spare.src = silence()
+  void spare
+    .play()
+    .then(() => spare.pause())
+    .catch(() => undefined)
+    .finally(() => {
+      if (spare !== audio) spare.removeAttribute('src')
+    })
+}
+
+/** A tenth of a second of silence, as a WAV file. */
+function silence(): string {
+  const n = 800
+  const b = new DataView(new ArrayBuffer(44 + n))
+  const text = (at: number, t: string): void => [...t].forEach((c, i) => b.setUint8(at + i, c.charCodeAt(0)))
+  text(0, 'RIFF')
+  b.setUint32(4, 36 + n, true)
+  text(8, 'WAVEfmt ')
+  b.setUint32(16, 16, true)
+  b.setUint16(20, 1, true)
+  b.setUint16(22, 1, true)
+  b.setUint32(24, 8000, true)
+  b.setUint32(28, 8000, true)
+  b.setUint16(32, 1, true)
+  b.setUint16(34, 8, true)
+  text(36, 'data')
+  b.setUint32(40, n, true)
+  for (let i = 0; i < n; i++) b.setUint8(44 + i, 128)
+  return URL.createObjectURL(new Blob([b.buffer], { type: 'audio/wav' }))
+}
+
+// Coming back to the app: make sure Web Audio is awake again.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && graph && graph.ctx.state !== 'running' && !audio.paused) void graph.ctx.resume().catch(() => undefined)
 })
-audio.addEventListener('ended', () => {
-  const { repeat, index, queue } = get()
-  if (repeat === 'one') {
-    audio.currentTime = 0
+
+let fading: { from: HTMLAudioElement; timer: ReturnType<typeof setInterval> } | null = null
+/** Getting the next song ready to fade into (so it's only tried once per song). */
+let fadeStarting = false
+
+function nextIndex(): number | null {
+  const { index, queue, repeat } = get()
+  if (index + 1 < queue.length) return index + 1
+  return repeat === 'all' && queue.length > 1 ? 0 : null
+}
+
+function maybeCrossfade(): void {
+  const { crossfade, repeat, queue, index } = get()
+  if (fading || fadeStarting || !crossfade || audio.paused) return
+  if (!volumeWorks && graph?.ctx.state !== 'running') return
+  const to = nextIndex()
+  const nextSong = to === null ? undefined : queue[to]
+  const fade = fadeLength(crossfade, audio.duration, (nextSong?.durationMs ?? 0) / 1000)
+  if (!nextSong || nextSong.id === queue[index]?.id) return
+  if (!shouldCrossfade({ fade, position: audio.currentTime, duration: audio.duration, repeatOne: repeat === 'one', hasNext: true })) return
+  void crossfadeTo(to!, fade)
+}
+
+async function crossfadeTo(to: number, seconds: number): Promise<void> {
+  const song = get().queue[to]
+  const id = playId
+  fadeStarting = true
+  const from = audio
+  try {
+    // Only if the next song is already fetched (it usually is); otherwise it just plays after this one.
+    const url = await Promise.race([sound(song), new Promise<null>((r) => setTimeout(() => r(null), 300))])
+    if (!url || id !== playId || from !== audio || from.paused) return
+    const el = otherDeck()
+    setVolume(el, 0)
+    el.src = url
+    await el.play()
+    if (id !== playId || from !== audio) {
+      el.pause()
+      return
+    }
+    // The new song is now the current one; the old one fades out underneath it.
+    const started = performance.now()
+    audio = el
+    playId++
     counted = false
-    void audio.play()
-  } else if (index + 1 < queue.length) void start(index + 1)
-  else if (repeat === 'all') void start(0)
-  else set({ playing: false })
-})
-audio.addEventListener('error', () => {
-  if (audio.src) set({ error: 'This song couldn’t be played (the phone may not play this kind of file).', playing: false })
-})
+    set({ index: to, position: el.currentTime, duration: Number.isFinite(el.duration) ? el.duration : song.durationMs / 1000, error: null, loading: null, playing: true })
+    void updateMediaSession(song)
+    prefetchNext()
+    const timer = setInterval(() => {
+      const t = (performance.now() - started) / 1000 / seconds
+      const v = fadeVolumes(t)
+      setVolume(el, v.incoming)
+      setVolume(from, v.outgoing)
+      if (t >= 1) endCrossfade()
+    }, 50)
+    fading = { from, timer }
+  } catch {
+    // The phone wouldn't start it: the next song plays when this one ends, as usual.
+  } finally {
+    fadeStarting = false
+  }
+}
+
+/** Finishes a fade straight away (when you skip, seek or pause in the middle of one). */
+function endCrossfade(): void {
+  if (!fading) return
+  clearInterval(fading.timer)
+  fading.from.pause()
+  fading.from.removeAttribute('src')
+  fading.from.load()
+  fading = null
+  setVolume(audio, 1)
+}
+
+export function setCrossfade(seconds: number): void {
+  const crossfade = Math.max(0, Math.min(CROSSFADE_MAX, Math.round(seconds) || 0))
+  set({ crossfade })
+  void db.put('kv', 'crossfade', crossfade)
+  // Moving the slider counts as a tap, so Web Audio can start here.
+  getReadyToFade()
+}
+
+void db.get<number>('kv', 'crossfade').then((n) => typeof n === 'number' && set({ crossfade: n }))
 
 // ---------- Lock screen and headphones ----------
 
@@ -254,7 +444,10 @@ async function updateMediaSession(song: Song): Promise<void> {
 if ('mediaSession' in navigator) {
   const handlers: [MediaSessionAction, MediaSessionActionHandler][] = [
     ['play', () => void audio.play()],
-    ['pause', () => audio.pause()],
+    ['pause', () => {
+      endCrossfade()
+      audio.pause()
+    }],
     ['nexttrack', () => next()],
     ['previoustrack', () => previous()],
     ['seekto', (d) => d.seekTime !== undefined && seek(d.seekTime)],

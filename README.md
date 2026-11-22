@@ -13,6 +13,8 @@ It's a web app you add to your phone's home screen. It runs from GitHub Pages at
 - Shows songs, albums, artists, playlists, Liked songs, Recently added and Most played, with the
   covers and details saved inside the MP3 files.
 - Plays with the lock screen and headphone controls, shuffle, repeat and Up next.
+- Crossfades between songs (Settings → Playing, up to 12 seconds). iPhones don't let web apps change a
+  song's volume, so there the sound goes through Web Audio once crossfade is on.
 - Likes, plays and playlist changes are written to `orbit-music.json` in the music folder, the same
   file Orbit on the computer uses, so both stay in step.
 - Downloads songs, albums or playlists to the phone for playing with no signal.
