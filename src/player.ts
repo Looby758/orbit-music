@@ -32,8 +32,14 @@ export const usePlayer = create<PlayerState>(() => ({ queue: [], index: 0, playi
 const set = usePlayer.setState
 const get = usePlayer.getState
 
-/** The song playing now. While crossfading, the one fading out is `fading.from`. */
-let audio = newDeck()
+/**
+ * Two players, used in turn: the song playing now (`audio`) and the next one when crossfading
+ * (while it fades in, the old one is `fading.from`). The same two are always used, because an
+ * iPhone only lets a player start by itself after you've pressed play on it once.
+ */
+const decks = [newDeck(), newDeck()]
+let audio = decks[0]
+const otherDeck = (): HTMLAudioElement => (audio === decks[0] ? decks[1] : decks[0])
 /** The order before shuffling, to go back to. */
 let ordered: Song[] = []
 
@@ -110,6 +116,7 @@ const shuffled = <T>(list: T[]): T[] => {
 /** Plays a list of songs from this one (or shuffled). */
 export function playSongs(songs: Song[], from: number | 'shuffle'): void {
   if (!songs.length) return
+  getReadyToFade()
   ordered = songs
   if (from === 'shuffle') {
     set({ shuffle: true, queue: shuffled(songs) })
@@ -126,6 +133,7 @@ export function playSongs(songs: Song[], from: number | 'shuffle'): void {
 
 export function toggle(): void {
   if (!get().queue.length) return
+  getReadyToFade()
   if (!audio.src) return void start(get().index).then(() => resumeAt && ((audio.currentTime = resumeAt), (resumeAt = 0)))
   endCrossfade()
   if (audio.paused) void audio.play().catch(() => undefined)
@@ -257,8 +265,85 @@ function newDeck(): HTMLAudioElement {
 
 // ---------- Crossfading ----------
 
-/** Whether this phone can fade at all (iPhones don't let web apps change a song's volume). */
-export const crossfadeWorks = canFadeVolume()
+/**
+ * Most phones fade by changing each player's volume. iPhones don't let web apps do that, so
+ * there the sound goes through a Web Audio volume knob instead (only once crossfade is turned on).
+ */
+export const volumeWorks = canFadeVolume()
+let graph: { ctx: AudioContext; gains: Map<HTMLAudioElement, GainNode> } | null = null
+
+function setVolume(el: HTMLAudioElement, v: number): void {
+  const gain = graph?.gains.get(el)
+  if (gain) gain.gain.value = v
+  else el.volume = v
+}
+
+/** Wires both players through Web Audio (iPhone, crossfade on). Once wired, they stay wired. */
+function ensureGraph(): void {
+  if (volumeWorks || graph || !get().crossfade) return
+  try {
+    const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+    const ctx = new Ctx()
+    const gains = new Map<HTMLAudioElement, GainNode>()
+    for (const el of decks) {
+      const gain = ctx.createGain()
+      ctx.createMediaElementSource(el).connect(gain).connect(ctx.destination)
+      gains.set(el, gain)
+    }
+    graph = { ctx, gains }
+  } catch (err) {
+    report(err)
+  }
+}
+
+let unlocked = false
+/**
+ * Called when you press play: wires up Web Audio if it's needed, wakes it, and (once) plays a
+ * moment of silence on the spare player, so the phone lets it start the next song by itself later.
+ */
+function getReadyToFade(): void {
+  if (!get().crossfade) return
+  ensureGraph()
+  if (graph?.ctx.state !== 'running') void graph?.ctx.resume().catch(() => undefined)
+  if (unlocked) return
+  unlocked = true
+  const spare = otherDeck()
+  if (spare.src) return
+  spare.src = silence()
+  void spare
+    .play()
+    .then(() => spare.pause())
+    .catch(() => undefined)
+    .finally(() => {
+      if (spare !== audio) spare.removeAttribute('src')
+    })
+}
+
+/** A tenth of a second of silence, as a WAV file. */
+function silence(): string {
+  const n = 800
+  const b = new DataView(new ArrayBuffer(44 + n))
+  const text = (at: number, t: string): void => [...t].forEach((c, i) => b.setUint8(at + i, c.charCodeAt(0)))
+  text(0, 'RIFF')
+  b.setUint32(4, 36 + n, true)
+  text(8, 'WAVEfmt ')
+  b.setUint32(16, 16, true)
+  b.setUint16(20, 1, true)
+  b.setUint16(22, 1, true)
+  b.setUint32(24, 8000, true)
+  b.setUint32(28, 8000, true)
+  b.setUint16(32, 1, true)
+  b.setUint16(34, 8, true)
+  text(36, 'data')
+  b.setUint32(40, n, true)
+  for (let i = 0; i < n; i++) b.setUint8(44 + i, 128)
+  return URL.createObjectURL(new Blob([b.buffer], { type: 'audio/wav' }))
+}
+
+// Coming back to the app: make sure Web Audio is awake again.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && graph && graph.ctx.state !== 'running' && !audio.paused) void graph.ctx.resume().catch(() => undefined)
+})
 
 let fading: { from: HTMLAudioElement; timer: ReturnType<typeof setInterval> } | null = null
 /** Getting the next song ready to fade into (so it's only tried once per song). */
@@ -272,7 +357,8 @@ function nextIndex(): number | null {
 
 function maybeCrossfade(): void {
   const { crossfade, repeat, queue, index } = get()
-  if (!crossfadeWorks || fading || fadeStarting || !crossfade || audio.paused) return
+  if (fading || fadeStarting || !crossfade || audio.paused) return
+  if (!volumeWorks && graph?.ctx.state !== 'running') return
   const to = nextIndex()
   const nextSong = to === null ? undefined : queue[to]
   const fade = fadeLength(crossfade, audio.duration, (nextSong?.durationMs ?? 0) / 1000)
@@ -290,8 +376,8 @@ async function crossfadeTo(to: number, seconds: number): Promise<void> {
     // Only if the next song is already fetched (it usually is); otherwise it just plays after this one.
     const url = await Promise.race([sound(song), new Promise<null>((r) => setTimeout(() => r(null), 300))])
     if (!url || id !== playId || from !== audio || from.paused) return
-    const el = newDeck()
-    el.volume = 0
+    const el = otherDeck()
+    setVolume(el, 0)
     el.src = url
     await el.play()
     if (id !== playId || from !== audio) {
@@ -303,14 +389,14 @@ async function crossfadeTo(to: number, seconds: number): Promise<void> {
     audio = el
     playId++
     counted = false
-    set({ index: to, position: 0, duration: song.durationMs / 1000, error: null, loading: null, playing: true })
+    set({ index: to, position: el.currentTime, duration: Number.isFinite(el.duration) ? el.duration : song.durationMs / 1000, error: null, loading: null, playing: true })
     void updateMediaSession(song)
     prefetchNext()
     const timer = setInterval(() => {
       const t = (performance.now() - started) / 1000 / seconds
       const v = fadeVolumes(t)
-      el.volume = v.incoming
-      from.volume = v.outgoing
+      setVolume(el, v.incoming)
+      setVolume(from, v.outgoing)
       if (t >= 1) endCrossfade()
     }, 50)
     fading = { from, timer }
@@ -329,13 +415,15 @@ function endCrossfade(): void {
   fading.from.removeAttribute('src')
   fading.from.load()
   fading = null
-  audio.volume = 1
+  setVolume(audio, 1)
 }
 
 export function setCrossfade(seconds: number): void {
   const crossfade = Math.max(0, Math.min(CROSSFADE_MAX, Math.round(seconds) || 0))
   set({ crossfade })
   void db.put('kv', 'crossfade', crossfade)
+  // Moving the slider counts as a tap, so Web Audio can start here.
+  getReadyToFade()
 }
 
 void db.get<number>('kv', 'crossfade').then((n) => typeof n === 'number' && set({ crossfade: n }))

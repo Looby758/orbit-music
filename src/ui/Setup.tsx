@@ -5,7 +5,7 @@ import { fileInfo, findFolders, folderIdFromLink, FOLDER, foldersIn, type DriveF
 import { returnAddress, saveClientId, savedClientId, signIn, signOut } from '../google'
 import { back } from '../nav'
 import * as db from '../db'
-import { crossfadeWorks, setCrossfade, usePlayer } from '../player'
+import { volumeWorks, setCrossfade, usePlayer } from '../player'
 import { CROSSFADE_MAX } from '../crossfade'
 
 /** First time: your Google client ID, then signing in, then your music folder. */
@@ -264,16 +264,15 @@ export function SettingsPage() {
           <span className="grow">
             <strong>Crossfade between songs</strong>
             <span className="faint small">
-              {!crossfadeWorks
-                ? 'This phone doesn’t let web apps fade a song’s volume (iPhones don’t), so songs play one after another.'
-                : crossfade
-                  ? `The next song fades in over the last ${crossfade} ${crossfade === 1 ? 'second' : 'seconds'} of this one.`
-                  : 'Off: each song plays after the last one ends.'}
+              {crossfade
+                ? `The next song fades in over the last ${crossfade} ${crossfade === 1 ? 'second' : 'seconds'} of this one.`
+                : 'Off: each song plays after the last one ends.'}
+              {!volumeWorks && crossfade > 0 && ' On iPhone this is new: if the music stops when you lock the screen, turn it off.'}
             </span>
           </span>
           <span className="range-value">{crossfade ? `${crossfade} s` : 'Off'}</span>
         </label>
-        <input type="range" className="setting-range" min={0} max={CROSSFADE_MAX} step={1} value={crossfade} disabled={!crossfadeWorks} onChange={(e) => setCrossfade(Number(e.target.value))} data-crossfade aria-label="Crossfade between songs" />
+        <input type="range" className="setting-range" min={0} max={CROSSFADE_MAX} step={1} value={crossfade} onChange={(e) => setCrossfade(Number(e.target.value))} data-crossfade aria-label="Crossfade between songs" />
       </section>
       <section className="card-box">
         <h2>Downloads</h2>
