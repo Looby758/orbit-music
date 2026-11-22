@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from 'react'
-import { ChevronLeft, ChevronRight, Disc3, Download, Heart, History, ListMusic, Mic2, MoreHorizontal, Music, Pencil, Play, Plus, RefreshCw, Search, Settings, Shuffle, Sparkles, Trash2, TrendingUp, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, MonitorSmartphone, Disc3, Download, Heart, History, ListMusic, Mic2, MoreHorizontal, Music, Pencil, Play, Plus, RefreshCw, Search, Settings, Shuffle, Sparkles, Trash2, TrendingUp, X } from 'lucide-react'
 import { downloadSongs, editMusic, refreshLibrary, removeDownloads, useLibrary } from '../library'
 import { albumsOf, artistsOf, likedSongs, mostPlayed, playlistSongs, recentlyAdded, songsByPath } from '../musicLibrary'
 import { back, currentPage, go, useNav, type Page } from '../nav'
@@ -113,6 +113,7 @@ function Home() {
           )
         })}
       </div>
+      <ComputerRemotes />
       <h2 className="section-title">Browse</h2>
       <div className="rows">
         <BrowseRow icon={<Music size={20} />} label="Songs" sub={`${songs.length}`} page={{ kind: 'songs' }} />
@@ -121,6 +122,32 @@ function Home() {
       </div>
       {newList && <NewPlaylist onClose={() => setNewList(false)} />}
     </div>
+  )
+}
+
+/** Orbit's phone remote on your computers: tap to open it (play, pause, skip, volume, Up next). */
+function ComputerRemotes() {
+  const remotes = useLibrary((s) => s.remotes)
+  if (!remotes.length) return null
+  return (
+    <>
+      <h2 className="section-title">Control my computer</h2>
+      <div className="rows">
+        {remotes.map((r) => (
+          <a key={r.name} className="list-row" href={r.url} target="_blank" rel="noreferrer" data-computer-remote={r.name}>
+            <span className="tile-icon">
+              <MonitorSmartphone size={20} />
+            </span>
+            <span className="song-text">
+              <strong>{r.name}</strong>
+              <span>Play, pause, skip and change the volume of Orbit's music</span>
+            </span>
+            <ChevronRight size={18} className="faint" />
+          </a>
+        ))}
+      </div>
+      <p className="note">Works when this phone is on the same Wi-Fi as the computer, with Orbit open.</p>
+    </>
   )
 }
 

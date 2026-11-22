@@ -6,6 +6,7 @@
 
 import { accessToken, SignInNeeded, tokenRejected } from './google'
 import { isAudio } from './song'
+import { isRemoteFileName } from './remote'
 
 const API = 'https://www.googleapis.com/drive/v3'
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3'
@@ -103,12 +104,15 @@ export interface FolderScan {
   songs: (DriveFile & { path: string })[]
   /** orbit-music.json, if there is one. */
   data: DriveFile | null
+  /** orbit-remote-<computer>.json: where Orbit's phone remote is on each computer. */
+  remotes: DriveFile[]
 }
 
 /** Everything in the music folder and the folders inside it. */
 export async function scanFolder(rootId: string, onProgress?: (found: number) => void): Promise<FolderScan> {
   const songs: FolderScan['songs'] = []
   let data: DriveFile | null = null
+  const remotes: DriveFile[] = []
   const queue: { id: string; prefix: string }[] = [{ id: rootId, prefix: '' }]
   const seen = new Set<string>()
   while (queue.length) {
@@ -124,6 +128,8 @@ export async function scanFolder(rootId: string, onProgress?: (found: number) =>
           }
         } else if (!f.prefix && file.name === DATA_FILE) {
           data = file
+        } else if (!f.prefix && isRemoteFileName(file.name)) {
+          remotes.push(file)
         } else if (isAudio(file.name)) {
           songs.push({ ...file, path: `${f.prefix}${file.name}` })
         }
@@ -131,7 +137,7 @@ export async function scanFolder(rootId: string, onProgress?: (found: number) =>
     }
     onProgress?.(songs.length)
   }
-  return { songs, data }
+  return { songs, data, remotes }
 }
 
 /** The first bytes of a file (for a song's details). */

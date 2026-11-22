@@ -16,6 +16,10 @@ It's a web app you add to your phone's home screen. It runs from GitHub Pages at
 - Likes, plays and playlist changes are written to `orbit-music.json` in the music folder, the same
   file Orbit on the computer uses, so both stay in step.
 - Downloads songs, albums or playlists to the phone for playing with no signal.
+- **Control my computer**: with the phone remote turned on in Orbit (Music page → phone button),
+  Home shows each computer; tap one to play, pause, skip, seek, change the volume and pick from Up
+  next there. Orbit says where its remote is in `orbit-remote-<computer>.json` in the music folder.
+  The phone needs to be on the same Wi-Fi.
 
 ## Setting it up (once)
 
@@ -47,4 +51,5 @@ npm run build      # into dist/
 ```
 
 `src/musicLibrary.ts` is a copy of `src/shared/musicLibrary.ts` from Orbit (notes-app), so both
-read and change `orbit-music.json` the same way. Keep them the same.
+read and change `orbit-music.json` the same way (including `months`, the plays kept by month for
+Orbit's listening stats). Keep them the same.
