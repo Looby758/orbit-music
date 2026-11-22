@@ -5,6 +5,8 @@ import { fileInfo, findFolders, folderIdFromLink, FOLDER, foldersIn, type DriveF
 import { returnAddress, saveClientId, savedClientId, signIn, signOut } from '../google'
 import { back } from '../nav'
 import * as db from '../db'
+import { crossfadeWorks, setCrossfade, usePlayer } from '../player'
+import { CROSSFADE_MAX } from '../crossfade'
 
 /** First time: your Google client ID, then signing in, then your music folder. */
 export function Setup() {
@@ -226,6 +228,7 @@ export function SettingsPage() {
   const totalSize = useLibrary((s) => s.songs.reduce((n, x) => n + x.size, 0))
   const downloadingNow = useLibrary((s) => Object.keys(s.downloading).length)
   const pending = useLibrary((s) => s.pending.length)
+  const crossfade = usePlayer((s) => s.crossfade)
   const [choosing, setChoosing] = useState(false)
   const [usage, setUsage] = useState<string>('')
   useEffect(() => {
@@ -254,6 +257,23 @@ export function SettingsPage() {
           </button>
         </div>
         {pending > 0 && <p className="faint small">{pending} {pending === 1 ? 'change waits' : 'changes wait'} to be saved to Drive (next time you’re online).</p>}
+      </section>
+      <section className="card-box" data-crossfade-setting>
+        <h2>Playing</h2>
+        <label className="range-row">
+          <span className="grow">
+            <strong>Crossfade between songs</strong>
+            <span className="faint small">
+              {!crossfadeWorks
+                ? 'This phone doesn’t let web apps fade a song’s volume (iPhones don’t), so songs play one after another.'
+                : crossfade
+                  ? `The next song fades in over the last ${crossfade} ${crossfade === 1 ? 'second' : 'seconds'} of this one.`
+                  : 'Off: each song plays after the last one ends.'}
+            </span>
+          </span>
+          <span className="range-value">{crossfade ? `${crossfade} s` : 'Off'}</span>
+        </label>
+        <input type="range" className="setting-range" min={0} max={CROSSFADE_MAX} step={1} value={crossfade} disabled={!crossfadeWorks} onChange={(e) => setCrossfade(Number(e.target.value))} data-crossfade aria-label="Crossfade between songs" />
       </section>
       <section className="card-box">
         <h2>Downloads</h2>
