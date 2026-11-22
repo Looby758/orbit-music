@@ -11,6 +11,7 @@ import { restoreToken, SignInNeeded, hasToken } from './google'
 import { bytesNeeded, readTags } from './id3'
 import { applyMusicEdit, emptyMusicData, normalizeMusicData, type MusicData, type MusicEdit } from './musicLibrary'
 import { guessFromName, type Song } from './song'
+import { parseRemoteFile, sortRemotes, type RemoteFile } from './remote'
 
 export interface Folder {
   id: string
@@ -50,6 +51,8 @@ interface LibraryState {
   pending: MusicEdit[]
   /** Every song is kept on this phone (new ones are downloaded as they're found). */
   keepAll: boolean
+  /** Computers with Orbit's phone remote on (from orbit-remote-*.json in the music folder). */
+  remotes: RemoteFile[]
 }
 
 export const useLibrary = create<LibraryState>(() => ({
@@ -66,7 +69,8 @@ export const useLibrary = create<LibraryState>(() => ({
   downloaded: new Set(),
   downloading: {},
   pending: [],
-  keepAll: false
+  keepAll: false,
+  remotes: []
 }))
 
 const set = useLibrary.setState
@@ -146,6 +150,7 @@ async function readLibrary(): Promise<void> {
     const scan = await scanFolder(folder.id, (found) => set({ scan: { found, read: 0 } }))
     // The playlists first: they're quick, and they're what you came for.
     await readData(scan.data)
+    void readRemotes(scan.remotes)
     const old = new Map(useLibrary.getState().songs.map((s) => [s.id, s]))
     const songs: Song[] = []
     const toRead: typeof scan.songs = []
@@ -229,6 +234,12 @@ export function setDuration(song: Song, ms: number): void {
   set({ songs })
   void db.get<CachedTags>('tags', song.id).then((t) => t && db.put('tags', song.id, { ...t, durationMs: ms }))
   void db.put('kv', 'songs', songs)
+}
+
+/** Where Orbit's phone remote is on each computer (quietly skipped if a file can't be read). */
+async function readRemotes(files: DriveFile[]): Promise<void> {
+  const found = await Promise.all(files.map((f) => readJson(f.id).then(parseRemoteFile, () => null)))
+  set({ remotes: sortRemotes(found.filter((r): r is RemoteFile => !!r)) })
 }
 
 async function readData(file: DriveFile | null): Promise<void> {
