@@ -450,13 +450,20 @@ if ('mediaSession' in navigator) {
     }],
     ['nexttrack', () => next()],
     ['previoustrack', () => previous()],
-    ['seekto', (d) => d.seekTime !== undefined && seek(d.seekTime)],
-    ['seekbackward', (d) => seek(audio.currentTime - (d.seekOffset ?? 10))],
-    ['seekforward', (d) => seek(audio.currentTime + (d.seekOffset ?? 10))]
+    ['seekto', (d) => d.seekTime !== undefined && seek(d.seekTime)]
   ]
   for (const [action, fn] of handlers) {
     try {
       navigator.mediaSession.setActionHandler(action, fn)
+    } catch {
+      // This phone doesn't have that button.
+    }
+  }
+  // No 10-second jump buttons: when they're set, the iPhone lock screen shows them in place of
+  // previous / next song, so leave them off and the lock screen skips whole songs instead.
+  for (const action of ['seekbackward', 'seekforward'] as MediaSessionAction[]) {
+    try {
+      navigator.mediaSession.setActionHandler(action, null)
     } catch {
       // This phone doesn't have that button.
     }
