@@ -10,18 +10,26 @@ export type Store = (typeof STORES)[number]
 
 let opening: Promise<IDBDatabase> | null = null
 function db(): Promise<IDBDatabase> {
-  opening ??= new Promise((resolve, reject) => {
+  opening ??= new Promise<IDBDatabase>((resolve, reject) => {
     const req = indexedDB.open(NAME, 1)
     req.onupgradeneeded = () => {
       for (const s of STORES) if (!req.result.objectStoreNames.contains(s)) req.result.createObjectStore(s)
     }
-    req.onsuccess = () => resolve(req.result)
+    req.onsuccess = () => {
+      // The phone can close the storage under the app (iPhones do after a while in the background):
+      // open it again next time rather than failing.
+      req.result.onclose = () => (opening = null)
+      resolve(req.result)
+    }
     req.onerror = () => reject(req.error)
+  }).catch((err) => {
+    opening = null
+    throw err
   })
   return opening
 }
 
-function run<T>(store: Store, mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest): Promise<T> {
+function once<T>(store: Store, mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest): Promise<T> {
   return db().then(
     (d) =>
       new Promise<T>((resolve, reject) => {
@@ -32,6 +40,16 @@ function run<T>(store: Store, mode: IDBTransactionMode, fn: (s: IDBObjectStore) 
         tx.onabort = () => reject(tx.error)
       })
   )
+}
+
+/** Runs one request; if the connection to the storage was lost, opens it again and tries once more. */
+function run<T>(store: Store, mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest): Promise<T> {
+  return once<T>(store, mode, fn).catch((err: unknown) => {
+    const name = (err as DOMException | null)?.name
+    if (name !== 'InvalidStateError' && name !== 'UnknownError') throw err
+    opening = null
+    return once<T>(store, mode, fn)
+  })
 }
 
 export const get = <T>(store: Store, key: string): Promise<T | undefined> => run<T | undefined>(store, 'readonly', (s) => s.get(key))

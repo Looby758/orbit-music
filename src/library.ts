@@ -7,7 +7,7 @@
 import { create } from 'zustand'
 import * as db from './db'
 import { createJson, download, DriveError, readJson, readStart, scanFolder, whoAmI, writeJson, type DriveFile } from './drive'
-import { restoreToken, SignInNeeded, hasToken } from './google'
+import { canUseDrive, quietReconnect, restoreToken, SignInNeeded } from './google'
 import { bytesNeeded, readTags } from './id3'
 import { applyMusicEdit, emptyMusicData, normalizeMusicData, type MusicData, type MusicEdit } from './musicLibrary'
 import { guessFromName, type Song } from './song'
@@ -33,7 +33,7 @@ interface CachedTags {
 interface LibraryState {
   ready: boolean
   signedIn: boolean
-  /** The key to Drive ran out: a tap on Reconnect gets a new one. */
+  /** The key to Drive ran out and couldn't be renewed quietly: a tap on Reconnect gets a new one. */
   needsSignIn: boolean
   email: string
   folder: Folder | null
@@ -74,6 +74,7 @@ export const useLibrary = create<LibraryState>(() => ({
 }))
 
 const set = useLibrary.setState
+
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
 /** A problem from Drive: running out of sign-in shows Reconnect, anything else shows the message. */
@@ -94,6 +95,9 @@ export async function startLibrary(): Promise<void> {
     db.get<MusicEdit[]>('kv', 'pending'),
     db.get<boolean>('kv', 'keepAll')
   ])
+  // The key ran out while the app was closed: go to Google and straight back by itself, rather than
+  // waiting for a tap on Reconnect (downloaded songs never need this).
+  if (!auth.signedIn && !auth.error && folder && (await quietReconnect())) return
   set({
     ready: true,
     signedIn: auth.signedIn,
@@ -118,11 +122,15 @@ export async function startLibrary(): Promise<void> {
         })
         .catch(() => undefined)
     if (folder) void refreshLibrary()
+    void resumeDownloads()
   }
-  window.addEventListener('online', () => void sendPending())
+  window.addEventListener('online', () => {
+    void sendPending()
+    if (canUseDrive()) void resumeDownloads()
+  })
   // Back to the app after a while: pick up changes made on the computer.
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && hasToken() && useLibrary.getState().folder && Date.now() - lastRead > 5 * 60_000) void refreshLibrary()
+    if (document.visibilityState === 'visible' && canUseDrive() && useLibrary.getState().folder && Date.now() - lastRead > 5 * 60_000) void refreshLibrary()
   })
 }
 
@@ -184,9 +192,7 @@ async function readLibrary(): Promise<void> {
     set({ songs, scan: null })
     lastRead = Date.now()
     await db.put('kv', 'songs', songs)
-    // Downloads of songs no longer in the folder aren't needed.
-    const present = new Set(songs.map((s) => s.id))
-    for (const id of useLibrary.getState().downloaded) if (!present.has(id)) void removeDownload(id)
+    await keepMovedDownloads(old, songs)
     if (useLibrary.getState().keepAll) downloadSongs(songs)
   } catch (err) {
     set({ scan: null })
@@ -278,7 +284,7 @@ export function editMusic(edit: MusicEdit): void {
 function sendPending(): Promise<void> {
   sending = sending.then(async () => {
     const { pending, folder, dataFile } = useLibrary.getState()
-    if (!pending.length || !folder || !hasToken() || !navigator.onLine) return
+    if (!pending.length || !folder || !canUseDrive() || !navigator.onLine) return
     try {
       const latest = dataFile ? normalizeMusicData(await readJson(dataFile.id)) : emptyMusicData()
       const data = pending.reduce(applyMusicEdit, latest)
@@ -318,6 +324,58 @@ export function artUrl(song: Song): Promise<string | null> {
 
 let downloadQueue: Promise<void> = Promise.resolve()
 
+/**
+ * A song's file in Drive can come back with a new id (put back in the folder by the computer, or
+ * moved out and in again). Its download on this phone is still the same song, so it moves to the
+ * new id rather than being thrown away and fetched again. Downloads of songs really gone from the
+ * folder are removed.
+ */
+async function keepMovedDownloads(old: Map<string, Song>, songs: Song[]): Promise<void> {
+  const { move, remove } = movedDownloads(old, songs, useLibrary.getState().downloaded)
+  for (const [from, to] of move) await moveDownload(from, to).catch(() => removeDownload(from))
+  for (const id of remove) await removeDownload(id)
+}
+
+/** Which downloads moved to a new id (same path, same size), and which songs are gone for good. */
+export function movedDownloads(old: Map<string, Song>, songs: Song[], downloaded: Set<string>): { move: [string, string][]; remove: string[] } {
+  const present = new Set(songs.map((s) => s.id))
+  const byPath = new Map(songs.filter((s) => !downloaded.has(s.id)).map((s) => [s.path.toLowerCase(), s]))
+  const move: [string, string][] = []
+  const remove: string[] = []
+  for (const id of downloaded) {
+    if (present.has(id)) continue
+    const was = old.get(id)
+    const now = was && byPath.get(was.path.toLowerCase())
+    if (was && now && (!was.size || !now.size || was.size === now.size)) {
+      byPath.delete(was.path.toLowerCase())
+      move.push([id, now.id])
+    } else remove.push(id)
+  }
+  return { move, remove }
+}
+
+async function moveDownload(from: string, to: string): Promise<void> {
+  const blob = await db.get<Blob>('songs', from)
+  if (!blob) return removeDownload(from)
+  await db.put('songs', to, blob)
+  await db.del('songs', from)
+  const downloaded = new Set(useLibrary.getState().downloaded)
+  downloaded.delete(from)
+  downloaded.add(to)
+  set({ downloaded })
+}
+
+/** Songs asked to be downloaded that haven't finished yet (kept, so they carry on after a reconnect or reopening). */
+const saveWanted = (): Promise<void> => db.put('kv', 'downloadsLeft', Object.keys(useLibrary.getState().downloading))
+
+/** Carries on downloads that were stopped (by running out of sign-in, losing signal, or closing the app). */
+async function resumeDownloads(): Promise<void> {
+  const left = (await db.get<string[]>('kv', 'downloadsLeft')) ?? []
+  if (!left.length) return
+  const ids = new Set(left)
+  downloadSongs(useLibrary.getState().songs.filter((s) => ids.has(s.id)))
+}
+
 /** Downloads songs to this phone, one at a time. */
 export function downloadSongs(songs: Song[]): void {
   db.keepStorage()
@@ -325,6 +383,7 @@ export function downloadSongs(songs: Song[]): void {
   const todo = songs.filter((s) => !downloaded.has(s.id) && !(s.id in downloading))
   if (!todo.length) return
   set({ downloading: { ...downloading, ...Object.fromEntries(todo.map((s) => [s.id, 0])) } })
+  void saveWanted()
   for (const song of todo) {
     downloadQueue = downloadQueue.then(async () => {
       if (!(song.id in useLibrary.getState().downloading)) return
@@ -334,13 +393,14 @@ export function downloadSongs(songs: Song[]): void {
         set({ downloaded: new Set([...useLibrary.getState().downloaded, song.id]) })
       } catch (err) {
         report(err)
-        // Without a sign-in the rest can't download either: they carry on next time.
-        if (err instanceof SignInNeeded || !navigator.onLine) cancelDownloads()
-      } finally {
-        const { [song.id]: _, ...rest } = useLibrary.getState().downloading
-        void _
-        set({ downloading: rest })
+        // Without a sign-in (or signal) the rest can't download either: they carry on after
+        // reconnecting, or next time the app opens.
+        if (err instanceof SignInNeeded || !navigator.onLine) return stopDownloads(true)
       }
+      const { [song.id]: _, ...rest } = useLibrary.getState().downloading
+      void _
+      set({ downloading: rest })
+      void saveWanted()
     })
   }
 }
@@ -350,7 +410,7 @@ export async function setKeepAll(on: boolean): Promise<void> {
   set({ keepAll: on })
   await db.put('kv', 'keepAll', on)
   if (on) downloadSongs(useLibrary.getState().songs)
-  else cancelDownloads()
+  else stopDownloads(false)
 }
 
 export async function removeDownload(id: string): Promise<void> {
@@ -360,22 +420,29 @@ export async function removeDownload(id: string): Promise<void> {
   const { [id]: _, ...downloading } = useLibrary.getState().downloading
   void _
   set({ downloaded, downloading })
+  void saveWanted()
 }
 
 export function removeDownloads(songs: Song[]): void {
   for (const s of songs) void removeDownload(s.id)
 }
 
-/** Stops downloads that haven't finished. */
-export function cancelDownloads(): void {
+/** Stops downloads that haven't finished: for now (`later`, they carry on next time), or for good. */
+function stopDownloads(later: boolean): void {
   set({ downloading: {} })
+  if (!later) void saveWanted()
+}
+
+/** Stops downloads that haven't finished, for good. */
+export function cancelDownloads(): void {
+  stopDownloads(false)
 }
 
 export const downloadedBlob = (id: string): Promise<Blob | undefined> => db.get<Blob>('songs', id)
 
 /** Leaves the folder: forgets the song list (downloads too). */
 export async function forgetFolder(): Promise<void> {
-  await Promise.all(['folder', 'songs', 'data', 'dataFile', 'pending'].map((k) => db.del('kv', k)))
+  await Promise.all(['folder', 'songs', 'data', 'dataFile', 'pending', 'downloadsLeft'].map((k) => db.del('kv', k)))
   await db.clear('songs')
   set({ folder: null, songs: [], data: emptyMusicData(), dataFile: null, pending: [], downloaded: new Set(), downloading: {} })
 }
