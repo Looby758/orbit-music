@@ -39,8 +39,17 @@ It's a web app you add to your phone's home screen. It runs from GitHub Pages at
 
 ## Things to know
 
-- Google gives the app a key that lasts about an hour. After that, a "Reconnect" bar appears; one
-  tap gets a new key. Downloaded songs play without it.
+- Downloaded songs always play from the phone, signed in to Google or not.
+- Google gives the app a key that lasts about an hour. When the app opens after that, it goes to
+  Google and straight back by itself for a new one (no tap), and only shows the "Reconnect" bar if
+  Google wants you to choose something.
+- **Stay signed in** (Settings → Google account): paste the client ID's **Client secret** (Google
+  Cloud → Credentials → the Orbit Music client) and the app gets new keys by itself in the
+  background, with no trip to Google at all. Publish the app under OAuth consent screen → Audience,
+  or Google ends that long-lasting key every 7 days while it's in "Testing". The secret stays on the
+  phone.
+- If a song's file comes back in Drive with a new id (same name and size), its download is kept
+  rather than fetched again. Downloads stopped by losing sign-in or signal carry on afterwards.
 - Downloaded songs live inside the app's own storage on the phone, not in the Files app.
 
 ## Working on it

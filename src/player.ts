@@ -52,7 +52,8 @@ function sound(song: Song, onProgress?: (done: number) => void): Promise<string>
   let url = fetched.get(song.id)
   if (!url) {
     url = (async () => {
-      const saved = await downloadedBlob(song.id)
+      // A downloaded song always plays from this phone, signed in to Google or not.
+      const saved = await downloadedBlob(song.id).catch(() => undefined)
       const blob = saved ?? (await download(song.id, onProgress))
       return URL.createObjectURL(blob)
     })()

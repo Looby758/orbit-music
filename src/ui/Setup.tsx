@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Check, ChevronLeft, ChevronRight, Copy, ExternalLink, Folder as FolderIcon, HardDrive, LogOut, RefreshCw, Search, Trash2 } from 'lucide-react'
 import { chooseFolder, forgetFolder, refreshLibrary, report, setKeepAll, useLibrary, type Folder } from '../library'
 import { fileInfo, findFolders, folderIdFromLink, FOLDER, foldersIn, type DriveFile } from '../drive'
-import { returnAddress, saveClientId, savedClientId, signIn, signOut } from '../google'
+import { looksLikeSecret, returnAddress, saveClientId, saveClientSecret, savedClientId, savedClientSecret, signIn, signOut, staysSignedIn } from '../google'
 import { back } from '../nav'
 import * as db from '../db'
 import { volumeWorks, setCrossfade, usePlayer } from '../player'
@@ -312,6 +312,7 @@ export function SettingsPage() {
       <section className="card-box">
         <h2>Google account</h2>
         <p>{email || 'Signed in'}</p>
+        <StaySignedIn />
         <button
           className="btn"
           onClick={() => {
@@ -337,6 +338,85 @@ export function SettingsPage() {
         </button>
       </section>
       <p className="faint small center">Orbit Music · your playlists, likes and plays are shared with Orbit on your computer through orbit-music.json.</p>
+    </div>
+  )
+}
+
+/**
+ * Staying signed in: the client secret lets the app get a new key from Google by itself, so the
+ * Reconnect bar doesn't come back every hour.
+ */
+function StaySignedIn() {
+  const [saved, setSaved] = useState<string | null>(null)
+  const [value, setValue] = useState('')
+  useEffect(() => {
+    void savedClientSecret().then(setSaved)
+  }, [])
+  if (saved === null) return null
+  const on = !!saved && staysSignedIn()
+  if (on)
+    return (
+      <div className="stay-signed-in" data-stay-signed-in="on">
+        <p className="small">
+          <Check size={14} /> Stays signed in: when Google’s key runs out, the app gets a new one by itself.
+        </p>
+        <button className="link-btn small" onClick={() => void saveClientSecret('').then(() => setSaved(''))}>
+          Turn off
+        </button>
+      </div>
+    )
+  return (
+    <div className="stay-signed-in" data-stay-signed-in="off">
+      <p>
+        <strong>Stay signed in</strong>
+      </p>
+      <p className="faint small">
+        {saved
+          ? 'Almost there: sign in once more so Google gives the app its long-lasting key.'
+          : 'Google’s key lasts an hour. To stop the Reconnect bar coming back, give the app your client ID’s secret, so it can get a new key by itself:'}
+      </p>
+      {!saved && (
+        <>
+          <ol className="steps small">
+            <li>
+              Open{' '}
+              <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">
+                Credentials <ExternalLink size={12} />
+              </a>{' '}
+              in your Orbit project and tap the <strong>Orbit Music</strong> client ID.
+            </li>
+            <li>
+              Copy the <strong>Client secret</strong> (it starts with GOCSPX-) and paste it here. It stays on this phone.
+            </li>
+            <li>
+              In <strong>OAuth consent screen → Audience</strong>, press <strong>Publish app</strong>. While it says “Testing”, Google ends the key every 7 days.
+            </li>
+          </ol>
+          <form
+            className="new-playlist"
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (!looksLikeSecret(value)) return
+              void saveClientSecret(value).then(() => signIn(true))
+            }}
+          >
+            <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="GOCSPX-…" spellCheck={false} autoCapitalize="off" autoComplete="off" data-client-secret />
+            <button className="btn primary" disabled={!looksLikeSecret(value)}>
+              Save
+            </button>
+          </form>
+        </>
+      )}
+      {saved && (
+        <div className="buttons">
+          <button className="btn primary" onClick={() => void signIn(true)}>
+            Sign in once more
+          </button>
+          <button className="btn" onClick={() => void saveClientSecret('').then(() => setSaved(''))}>
+            Cancel
+          </button>
+        </div>
+      )}
     </div>
   )
 }

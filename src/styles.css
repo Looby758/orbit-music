@@ -840,3 +840,17 @@ a.list-row {
 .setting-range:disabled {
   opacity: 0.4;
 }
+
+.stay-signed-in {
+  border-top: 1px solid var(--line, rgba(127, 127, 127, 0.2));
+  border-bottom: 1px solid var(--line, rgba(127, 127, 127, 0.2));
+  margin: 12px 0;
+  padding: 10px 0;
+}
+.stay-signed-in p {
+  margin: 4px 0;
+}
+.stay-signed-in svg {
+  vertical-align: -2px;
+  color: var(--accent);
+}

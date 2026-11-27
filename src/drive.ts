@@ -4,7 +4,7 @@
  * orbit-music.json.
  */
 
-import { accessToken, SignInNeeded, tokenRejected } from './google'
+import { accessToken, SignInNeeded, TokenUnreachable, tokenRejected } from './google'
 import { isAudio } from './song'
 import { isRemoteFileName } from './remote'
 
@@ -31,17 +31,24 @@ export class DriveError extends Error {
   }
 }
 
-async function call(url: string, init: RequestInit = {}): Promise<Response> {
+async function call(url: string, init: RequestInit = {}, retried = false): Promise<Response> {
   const headers = new Headers(init.headers)
-  headers.set('Authorization', `Bearer ${accessToken()}`)
+  try {
+    headers.set('Authorization', `Bearer ${await accessToken()}`)
+  } catch (err) {
+    if (err instanceof TokenUnreachable) throw new DriveError(err.message, 0)
+    throw err
+  }
   let res: Response
   try {
     res = await fetch(url, { ...init, headers })
-  } catch {
+  } catch (err) {
+    if ((err as Error)?.name === 'AbortError') throw err
     throw new DriveError('Couldn’t reach Google Drive. Check you’re online.', 0)
   }
   if (res.status === 401) {
-    tokenRejected()
+    // The key stopped working early: get a new one quietly and try once more, if that can be done.
+    if (tokenRejected() && !retried) return call(url, init, true)
     throw new SignInNeeded()
   }
   if (!res.ok && res.status !== 206) {
